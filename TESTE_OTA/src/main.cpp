@@ -11,12 +11,12 @@
 WebServer server(80);
 
 // ===== Config WiFi AP =====
-const char* AP_SSID = "Produto_1234";
-const char* AP_PASS = "12345678"; // mínimo 8 chars
+const char* AP_SSID = "OTA_VLB5";
+const char* AP_PASS = "radcom22"; // mínimo 8 chars
 
 // ===== Auth básica =====
-const char* USER = "admin";
-const char* PASS = "admin";
+const char* USER = "Radcom";
+const char* PASS = "radcom22";
 
 // ---- Config validação/rollback ----
 static const uint32_t OTA_VALIDATE_TIMEOUT_MS = 30000; // 30s  <<<
@@ -46,7 +46,7 @@ static const char* PAGE_INDEX =
   "</body></html>";
 
 #ifndef FW_VERSION
-#define FW_VERSION "v1.0.0"
+#define FW_VERSION "v1.1.0"
 #endif
 
 // ===== util NVS (rollback) =====
