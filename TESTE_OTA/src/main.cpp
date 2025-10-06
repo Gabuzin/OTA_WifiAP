@@ -11,12 +11,12 @@
 WebServer server(80);
 
 // ===== Config WiFi AP =====
-const char* AP_SSID = "OTA_VLB5";
+const char* AP_SSID = "Produto_1234";
 const char* AP_PASS = "12345678"; // mínimo 8 chars
 
 // ===== Auth básica =====
-const char* USER = "Radcom";
-const char* PASS = "radcom22";
+const char* USER = "admin";
+const char* PASS = "admin";
 
 // ---- Config validação/rollback ----
 static const uint32_t OTA_VALIDATE_TIMEOUT_MS = 30000; // 30s  <<<
@@ -125,4 +125,105 @@ void handleUpdateUpload() {
 
   switch (upload.status) {
     case UPLOAD_FILE_START: {
-      Serial.printf("[OTA] Iniciando upload: %s\n
+      Serial.printf("[OTA] Iniciando upload: %s\n", upload.filename.c_str());
+
+      // Captura MD5 (se informado via campo form 'md5')
+      String md5 = server.arg("md5");      // <<<
+      md5.trim();
+      if (md5.length() == 32) {
+        Update.setMD5(md5.c_str());        // <<< rejeita imagem se MD5 não bater
+        Serial.printf("[OTA] MD5 esperado: %s\n", md5.c_str());
+      }
+
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+      }
+      break;
+    }
+    case UPLOAD_FILE_WRITE: {
+      size_t written = Update.write(upload.buf, upload.currentSize);
+      if (written != upload.currentSize) {
+        Update.printError(Serial);
+      }
+      break;
+    }
+    case UPLOAD_FILE_END: {
+      if (Update.end(true)) {
+        Serial.printf("[OTA] Sucesso: %u bytes\n", upload.totalSize);
+        // Marca como "pendente de validação" para permitir rollback automático <<< 
+        nvsSetPending(true);
+        g_otaPending = true;
+      } else {
+        Update.printError(Serial);
+      }
+      break;
+    }
+    case UPLOAD_FILE_ABORTED:
+      Update.abort();
+      Serial.println("[OTA] Abortado!");
+      break;
+  }
+  yield();
+}
+
+void handleUpdateDone() {
+  if (!checkAuth()) return;
+
+  if (!Update.hasError()) {
+    server.send(200, "text/html",
+      "<b>Atualizado com sucesso!</b><br>Reiniciando em 2s...");
+    Serial.println("[OTA] Reiniciando...");
+    delay(2000);
+    ESP.restart();
+  } else {
+    server.send(500, "text/plain", "Falhou! Verifique o serial.");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+
+  // NVS para rollback
+  nvs_flash_init();                           // <<< necessário antes de usar NVS
+  g_otaPending = nvsIsPending();              // <<< le flag pendente
+  g_bootMs = millis();                        // <<< para controlar timeout
+
+  // AP mode
+  WiFi.mode(WIFI_AP);
+  bool ok = WiFi.softAP(AP_SSID, AP_PASS);
+  Serial.printf("AP %s\n", ok ? "iniciado" : "falhou");
+  Serial.print("IP AP: "); Serial.println(WiFi.softAPIP());
+
+  // Rotas
+  server.on("/",       HTTP_GET, handleRoot);
+  server.on("/info",   HTTP_GET, handleInfo);
+  server.on("/validate", HTTP_POST, handleValidateNow);  // <<< POST para validar firmware
+
+  // Upload: duas funções (recebimento e finalização)
+  server.on(
+    "/update",
+    HTTP_POST,
+    handleUpdateDone,
+    handleUpdateUpload
+  );
+
+  server.enableCORS(true);
+
+  server.begin();
+  Serial.println("Servidor HTTP OTA pronto!");
+}
+
+void loop() {
+  server.handleClient();
+  delay(1);
+
+  // Se firmware está pendente e estourou janela de validação -> rollback automático  <<<
+  if (g_otaPending && (millis() - g_bootMs > OTA_VALIDATE_TIMEOUT_MS)) {
+    Serial.println("[ROLLBACK] Timeout de validação atingido. Voltando firmware...");
+    // Limpa pending para evitar loop infinito se rollback falhar
+    nvsSetPending(false);
+    g_otaPending = false;
+    rollbackToOtherPartition();
+  }
+}
