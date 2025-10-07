@@ -1,14 +1,9 @@
-#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
-
-// ==== ROLLBACK (NVS + particões) ====
-#include <nvs.h>            // <<<
-#include <nvs_flash.h>      // <<<
-#include <esp_ota_ops.h>    // <<<
-
-WebServer server(80);
+#include <Preferences.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 
 // ===== Config WiFi AP =====
 const char* AP_SSID = "OTA_VLB5";
@@ -18,73 +13,79 @@ const char* AP_PASS = "radcom22"; // mínimo 8 chars
 const char* USER = "Radcom";
 const char* PASS = "radcom22";
 
-// ---- Config validação/rollback ----
-static const uint32_t OTA_VALIDATE_TIMEOUT_MS = 30000; // 30s  <<<
-
-static bool   g_otaPending = false;    // estado lido do NVS       <<<
-static uint32_t g_bootMs   = 0;        // timestamp de boot         <<<
-
-// Página com campo opcional para MD5
-static const char* PAGE_INDEX =
-  "<!DOCTYPE html><html><head><meta charset='utf-8'/>"
-  "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
-  "<title>OTA Update</title></head><body>"
-  "<h2>Atualizar Firmware (.bin)</h2>"
-  "<form method='POST' action='/update' enctype='multipart/form-data'>"
-  "<p><label>Arquivo: <input type='file' name='update' accept='.bin' required></label></p>"
-  "<p><label>MD5 (opcional): <input name='md5' pattern='[a-fA-F0-9]{32}' "
-  "placeholder='ex.: d41d8cd98f00b204e9800998ecf8427e'></label></p>"
-  "<input type='submit' value='Enviar & Atualizar'>"
-  "</form>"
-  "<div id='log' style='margin-top:1rem;font-family:monospace;white-space:pre-wrap;'></div>"
-  "<script>"
-  "document.querySelector('form').addEventListener('submit',e=>{"
-  "  const log=document.getElementById('log');"
-  "  log.textContent='Enviando... Aguarde.\\n';"
-  "});"
-  "</script>"
-  "</body></html>";
-
 #ifndef FW_VERSION
-#define FW_VERSION "v1.1.0"
+#define FW_VERSION "v1.2.0"
 #endif
 
-// ===== util NVS (rollback) =====
-static void nvsSetPending(bool pending) {                       // <<<
-  nvs_handle h;
-  if (nvs_open("ota", NVS_READWRITE, &h) == ESP_OK) {
-    uint8_t v = pending ? 1 : 0;
-    nvs_set_u8(h, "pending", v);
-    nvs_commit(h);
-    nvs_close(h);
-  }
-}
+Preferences prefs;
 
-static bool nvsIsPending() {                                    // <<<
-  nvs_handle h;
-  uint8_t v = 0;
-  if (nvs_open("ota", NVS_READONLY, &h) == ESP_OK) {
-    nvs_get_u8(h, "pending", &v);
-    nvs_close(h);
-  }
-  return v == 1;
-}
 
-static void rollbackToOtherPartition() {                        // <<<
-  const esp_partition_t* running = esp_ota_get_running_partition();
-  const esp_partition_t* next    = esp_ota_get_next_update_partition(NULL);
-  // "next" é tipicamente a outra partição OTA (a anterior ao update).
-  if (next) {
-    esp_ota_set_boot_partition(next);
-    Serial.println("[ROLLBACK] Definido boot para partição anterior. Reiniciando...");
-    delay(100);
-    esp_restart();
-  } else {
-    Serial.println("[ROLLBACK] Partição de fallback não encontrada!");
-  }
-}
 
-// ===== Auth =====
+WebServer server(80);
+
+// ===== Página inicial OTA =====
+const char* htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Atualização OTA - ESP32</title>
+  <style>
+    body {
+      background-color: #f2f2f2;
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin-top: 60px;
+    }
+    h1 { color: #333; }
+    .version {
+      background: #fff;
+      border: 1px solid #ddd;
+      display: inline-block;
+      padding: 10px 20px;
+      margin-bottom: 20px;
+      border-radius: 8px;
+    }
+    form {
+      background: #fff;
+      border: 1px solid #ddd;
+      display: inline-block;
+      padding: 20px;
+      border-radius: 8px;
+    }
+    input[type=file] {
+      padding: 8px;
+      margin-bottom: 10px;
+    }
+    input[type=submit] {
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 15px;
+    }
+    input[type=submit]:hover {
+      background-color: #45a049;
+    }
+  </style>
+</head>
+<body>
+  <h1>Atualização OTA - ESP32</h1>
+  <div class="version">Versão atual: <b>%VERSION%</b></div>
+  <form method='POST' action='/update' enctype='multipart/form-data'>
+    <input type='file' name='firmware'>
+    <br><br>
+    <input type='submit' value='Enviar e Atualizar'>
+  </form>
+  <p style="margin-top:20px; color:#666;">SSID do AP: <b>%SSID%</b></p>
+</body>
+</html>
+)rawliteral";
+
+// ====== Funções ======
+
 bool checkAuth() {
   if (!server.authenticate(USER, PASS)) {
     server.requestAuthentication();
@@ -93,137 +94,89 @@ bool checkAuth() {
   return true;
 }
 
+String Get_running_partition() {
+  const esp_partition_t* p = esp_ota_get_running_partition();
+  return p ? String(p->label) : String("unknown");   // "factory", "ota_0", "ota_1"
+}
+
+String Get_nextBoot_partition() {
+  const esp_partition_t* p = esp_ota_get_boot_partition();  
+  return p ? String(p->label) : String("unknown");
+}
+String Get_nextUpdate_partition() {
+  const esp_partition_t* p = esp_ota_get_next_update_partition(NULL);  
+  return p ? String(p->label) : String("unknown");
+}
+
 void handleRoot() {
   if (!checkAuth()) return;
-  server.send(200, "text/html", PAGE_INDEX);
+
+  String html = htmlPage;
+  html.replace("%VERSION%", FW_VERSION);
+  html.replace("%SSID%", AP_SSID);
+  server.send(200, "text/html", html);
 }
 
-void handleInfo() {
-  if (!checkAuth()) return;
-  String info;
-  info.reserve(256);
-  info += "{";
-  info += "\"ip\":\""; info += WiFi.softAPIP().toString(); info += "\",";
-  info += "\"fw_version\":\""; info += String(FW_VERSION); info += "\",";
-  info += "\"ota_pending\":"; info += (g_otaPending ? "true" : "false");
-  info += "}";
-  server.send(200, "application/json", info);
-}
-
-void handleValidateNow() {                  // endpoint para marcar app como válido <<< 
-  if (!checkAuth()) return;
-  nvsSetPending(false);
-  g_otaPending = false;
-  server.send(200, "text/plain", "OK: firmware validado");
-  Serial.println("[OTA] Firmware validado (pending=false)");
-}
-
-void handleUpdateUpload() {
+void handleUpdate() {
   if (!checkAuth()) return;
 
   HTTPUpload& upload = server.upload();
-
-  switch (upload.status) {
-    case UPLOAD_FILE_START: {
-      Serial.printf("[OTA] Iniciando upload: %s\n", upload.filename.c_str());
-
-      // Captura MD5 (se informado via campo form 'md5')
-      String md5 = server.arg("md5");      // <<<
-      md5.trim();
-      if (md5.length() == 32) {
-        Update.setMD5(md5.c_str());        // <<< rejeita imagem se MD5 não bater
-        Serial.printf("[OTA] MD5 esperado: %s\n", md5.c_str());
-      }
-
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-        Update.printError(Serial);
-      }
-      break;
+  if (upload.status == UPLOAD_FILE_START) {
+    prefs.begin("ota",false);
+    prefs.putString("last_ok", Get_running_partition());
+    prefs.putString("next_boot")
+    
+    Serial.printf("Iniciando update: %s\n", upload.filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
     }
-    case UPLOAD_FILE_WRITE: {
-      size_t written = Update.write(upload.buf, upload.currentSize);
-      if (written != upload.currentSize) {
-        Update.printError(Serial);
-      }
-      break;
+  } 
+  else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
     }
-    case UPLOAD_FILE_END: {
-      if (Update.end(true)) {
-        Serial.printf("[OTA] Sucesso: %u bytes\n", upload.totalSize);
-        // Marca como "pendente de validação" para permitir rollback automático <<< 
-        nvsSetPending(true);
-        g_otaPending = true;
-      } else {
-        Update.printError(Serial);
-      }
-      break;
+  } 
+  else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("Atualização completa: %u bytes\n", upload.totalSize);
+    } else {
+      Update.printError(Serial);
     }
-    case UPLOAD_FILE_ABORTED:
-      Update.abort();
-      Serial.println("[OTA] Abortado!");
-      break;
   }
   yield();
 }
 
 void handleUpdateDone() {
   if (!checkAuth()) return;
-
-  if (!Update.hasError()) {
-    server.send(200, "text/html",
-      "<b>Atualizado com sucesso!</b><br>Reiniciando em 2s...");
-    Serial.println("[OTA] Reiniciando...");
-    delay(2000);
-    ESP.restart();
-  } else {
-    server.send(500, "text/plain", "Falhou! Verifique o serial.");
-  }
+  server.sendHeader("Connection", "close");
+  server.send(200, "text/plain", Update.hasError() ? "Falha na atualização" : "Atualização concluída, reiniciando...");
+  delay(1500);
+  ESP.restart();
 }
+
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
+  Serial.println("\n=== Modo OTA AP Iniciado ===");
+  Serial.printf("Versão: %s\n", FW_VERSION);
 
-  // NVS para rollback
-  nvs_flash_init();                           // <<< necessário antes de usar NVS
-  g_otaPending = nvsIsPending();              // <<< le flag pendente
-  g_bootMs = millis();                        // <<< para controlar timeout
 
-  // AP mode
+
+  // Inicia AP
   WiFi.mode(WIFI_AP);
-  bool ok = WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.printf("AP %s\n", ok ? "iniciado" : "falhou");
-  Serial.print("IP AP: "); Serial.println(WiFi.softAPIP());
+  WiFi.softAP(AP_SSID, AP_PASS);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("Acesse via navegador: http://");
+  Serial.println(IP);
 
   // Rotas
-  server.on("/",       HTTP_GET, handleRoot);
-  server.on("/info",   HTTP_GET, handleInfo);
-  server.on("/validate", HTTP_POST, handleValidateNow);  // <<< POST para validar firmware
-
-  // Upload: duas funções (recebimento e finalização)
-  server.on(
-    "/update",
-    HTTP_POST,
-    handleUpdateDone,
-    handleUpdateUpload
-  );
-
-  server.enableCORS(true);
-
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/update", HTTP_POST, handleUpdateDone, handleUpdate);
   server.begin();
-  Serial.println("Servidor HTTP OTA pronto!");
+
+  Serial.println("Servidor HTTP iniciado.");
 }
 
 void loop() {
   server.handleClient();
-  delay(1);
-
-  // Se firmware está pendente e estourou janela de validação -> rollback automático  <<<
-  if (g_otaPending && (millis() - g_bootMs > OTA_VALIDATE_TIMEOUT_MS)) {
-    Serial.println("[ROLLBACK] Timeout de validação atingido. Voltando firmware...");
-    // Limpa pending para evitar loop infinito se rollback falhar
-    nvsSetPending(false);
-    g_otaPending = false;
-    rollbackToOtherPartition();
-  }
 }
