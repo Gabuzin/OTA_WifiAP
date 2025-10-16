@@ -4,10 +4,8 @@
 
 TimerHandle_t xTimerWifi = nullptr;
 
-static const char *EXPECTED_AUTH = "Basic UmFkY29tOnJhZGNvbTIy";
-/*USUARIO: Radcom
-  SENHA:   radcom22 
-  */
+static const char *EXPECTED_AUTH = "Basic ";
+
 
 // 'server' precisa existir em algum lugar (defina em main.cpp)
 extern AsyncWebServer server;

@@ -7,12 +7,11 @@
 #include "freertos/task.h"
 #include "freertos/timers.h"
 
-Web web("v0.0.4");
-OTA ota_object("OTA-VLB5", "radcom22", 600);
+Web web("v0.0.4"); // version
+OTA ota_object("WifiName", "password", 600);// Wifi Name, password, timer to turn off wifi(if null -> always on) 
 AsyncWebServer server(80);
 
-// extern void early_bootloop_guard();
-// extern void zerar_contador_boot();
+
 
 
 
@@ -21,13 +20,13 @@ void setup() {
   vTaskDelay(pdMS_TO_TICKS(50));
 
   esp_task_wdt_init(5, true);
-  esp_task_wdt_add(NULL);
+  esp_task_wdt_add(NULL); // watchdog 
 
-  ota_object.bootGuard();
+  ota_object.bootGuard(); // boot verification (functions in portuguese(BR))
 
   ota_object.WifiAP(ota_object.timer);
   vTaskDelay(pdMS_TO_TICKS(50));
-  web.WEB_OTA(true);
+  web.WEB_OTA(true); // true: web autentication, false: no autentication -> static const char *EXPECTED_AUTH = "Basic Hash"(web.cpp)
   vTaskDelay(pdMS_TO_TICKS(50));
   server.begin();
 
