@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../GitHub/OTA_WifiAP/TESTE_OTA"
+		},
+		{
+			"name": "ESTUDO",
+			"path": "../../../../../GitHub/ESTUDO"
+		},
+		{
+			"name": "Biblioteca OTA",
+			"path": "../.."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"random": "cpp"
+		}
+	}
+}

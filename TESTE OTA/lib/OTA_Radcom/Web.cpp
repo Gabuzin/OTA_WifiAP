@@ -1,30 +1,49 @@
-#include <Arduino.h>
+#include "Web.h"
+#include "OTA.h"
 #include <WiFi.h>
-#include <Update.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
 
-AsyncWebServer server(80);
+TimerHandle_t xTimerWifi = nullptr;
 
-// ===== WiFi AP =====
-const char* AP_SSID = "OTA_VLB5";
-const char* AP_PASS = "radcom22";
+static const char *EXPECTED_AUTH = "Basic UmFkY29tOnJhZGNvbTIy";
+/*USUARIO: Radcom
+  SENHA:   radcom22 
+  */
 
-// ===== Credenciais (Basic Auth manual) =====
-const char* USER = "Radcom";
-const char* PASS = "radcom22";
+// 'server' precisa existir em algum lugar (defina em main.cpp)
+extern AsyncWebServer server;
 
-// "Basic " + base64("USER:PASS")
-// Radcom:radcom22 -> UmFkY29tOnJhZGNvbTIy
-static const char* EXPECTED_AUTH = "Basic UmFkY29tOnJhZGNvbTIy";
+Web::Web(String fwVersion)
+: FW_VERSION(fwVersion)// inicializa o membro
+{
+  // opcional: log
+  // Serial.println("[Web] FW_VERSION = " + FW_VERSION);
+}
 
-// ===== Versão de firmware =====
-#ifndef FW_VERSION
-#define FW_VERSION "v1.0.0"
-#endif
+// Autenticação nativa do AsyncWebServer (evita EXPECTED_AUTH)
+bool Web::autentication(AsyncWebServerRequest *req)
+{
+  if (!authEnabled) return true;
 
-// ===== HTML (igual ao seu, simples/estético) =====
-static const char PAGE_INDEX[] PROGMEM = R"HTML(
+  if (req->hasHeader("Authorization"))
+  {
+    AsyncWebHeader *h = req->getHeader("Authorization");
+    if (h && h->value() == EXPECTED_AUTH)
+      return true;
+  }
+  // Sem/errada -> 401 com prompt
+  AsyncWebServerResponse *resp = req->beginResponse(401, "text/plain", "Unauthorized");
+  resp->addHeader("WWW-Authenticate", "Basic realm=\"OTA\"");
+  req->send(resp);
+  return false;
+}
+
+void Web::pageOTA()
+{
+  server.on("/ota", HTTP_GET, [this](AsyncWebServerRequest *req)
+            {
+    if (!autentication(req)) return;
+
+    static const char PAGE_OTA[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
@@ -115,7 +134,7 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
     btnSend.disabled = true;
     log.textContent = 'Enviando... Aguarde.\n';
     try{
-      const r = await fetch('/update', { method:'POST', body:fd });
+      const r = await fetch('/ota/update', { method:'POST', body:fd });
       const txt = await r.text();
       log.textContent += 'Servidor respondeu: ' + txt + '\n';
       if(r.ok) log.textContent += 'Se o update foi aceito, o dispositivo vai reiniciar...\n';
@@ -138,97 +157,37 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
 </html>
 )HTML";
 
-// ===== Basic Auth manual (sem MD5) =====
-static bool checkAuth(AsyncWebServerRequest* request) {
-  if (request->hasHeader("Authorization")) {
-    AsyncWebHeader* h = request->getHeader("Authorization");
-    if (h && h->value() == EXPECTED_AUTH) return true;
-  }
-  // Sem/errada -> 401 com prompt
-  AsyncWebServerResponse* resp = request->beginResponse(401, "text/plain", "Unauthorized");
-  resp->addHeader("WWW-Authenticate", "Basic realm=\"OTA\"");
-  request->send(resp);
-  return false;
+   
+    req->send_P(200, "text/html", PAGE_OTA); });
 }
 
-// ===== Handlers =====
-static void handleRoot(AsyncWebServerRequest* request) {
-  if (!checkAuth(request)) return;
-  request->send_P(200, "text/html", PAGE_INDEX);
+// OBS: seu HTML chama fetch('/info'), então exponha '/info' (não '/ota/info')
+void Web::pageInfo()
+{
+  server.on("/info", HTTP_GET, [this](AsyncWebServerRequest *req)
+            {
+    if (!autentication(req)) return;
+    String json;
+    json.reserve(128);
+    json += "{";
+    json += "\"ip\":\""; json += WiFi.softAPIP().toString(); json += "\",";
+    json += "\"fw_version\":\""; json += FW_VERSION; json += "\"";
+    json += "}";
+    req->send(200, "application/json", json);
+});
 }
 
-static void handleInfo(AsyncWebServerRequest* request) {
-  if (!checkAuth(request)) return;
-  String json;
-  json.reserve(128);
-  json += "{";
-  json += "\"ip\":\""; json += WiFi.softAPIP().toString(); json += "\",";
-  json += "\"fw_version\":\""; json += FW_VERSION; json += "\"";
-  json += "}";
-  request->send(200, "application/json", json);
+void Web::pageUpdate()
+{
+  server.on("/ota/update", HTTP_POST, [](AsyncWebServerRequest *req)
+            { OTA::finishUpdate(req); }, [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final)
+            { OTA::handleUpload(req, filename, index, data, len, final); });
 }
 
-// Upload OTA (sem MD5)
-static void handleUpload(AsyncWebServerRequest* request, String filename, size_t index,
-                         uint8_t* data, size_t len, bool final) {
-  if (!checkAuth(request)) return;
-
-  if (index == 0) {
-    Serial.printf("[OTA] Iniciando upload: %s\n", filename.c_str());
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-      Update.printError(Serial);
-    }
-  }
-  if (len) {
-    if (Update.write(data, len) != len) {
-      Update.printError(Serial);
-    }
-  }
-  if (final) {
-    if (Update.end(true)) {
-      Serial.printf("[OTA] Sucesso: %u bytes\n", (unsigned)index + len);
-    } else {
-      Update.printError(Serial);
-    }
-  }
-}
-
-static void finishUpdate(AsyncWebServerRequest* request) {
-  if (!checkAuth(request)) return;
-
-  if (!Update.hasError()) {
-    request->send(200, "text/plain", "Atualização concluída! Reiniciando...");
-    Serial.println("[OTA] Reiniciando...");
-    delay(1500);
-    ESP.restart();
-  } else {
-    request->send(500, "text/plain", "Falhou! Veja o log serial.");
-  }
-}
-
-// ===== Setup / Loop =====
-void setup() {
-  Serial.begin(115200);
-  delay(300);
-
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.println();
-  Serial.print("AP SSID: "); Serial.println(AP_SSID);
-  Serial.print("AP IP  : "); Serial.println(WiFi.softAPIP());
-
-  // Rotas
-  server.on("/ota", HTTP_GET, handleRoot);
-  server.on("/ota/info", HTTP_GET, handleInfo);
-
-  // Upload multipart (POST /update)
-  server.on("/ota/update", HTTP_POST, finishUpdate,
-            handleUpload); // onFileUpload
-
-  server.begin();
-  Serial.println("Servidor OTA (Async) pronto!");
-}
-
-void loop() {
-  // nada: AsyncWebServer não precisa de handleClient()
+void Web::WEB_OTA(bool autenticacao)
+{
+  authEnabled = autenticacao;
+  pageOTA();
+  pageInfo();
+  pageUpdate();
 }
